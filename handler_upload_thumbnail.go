@@ -1,11 +1,17 @@
 package main
 
 import (
+	"encoding/base64"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 
-	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/auth"
+	"dotnetdev/internal/auth"
+
 	"github.com/google/uuid"
 )
 
@@ -44,14 +50,13 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 		respondWithError(w, http.StatusBadRequest, "Missing Content-Type for thumbnail", nil)
 		return
 	}
-
-	data, err := io.ReadAll(file)
-	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "Error reading file", err)
+	if !strings.HasPrefix(mediaType, "image/") {
+		respondWithError(w, http.StatusBadRequest, "Invalid Content-Type for thumbnail", nil)
 		return
 	}
 
 	video, err := cfg.db.GetVideo(videoID)
+	fmt.Printf("Initial video: %+v\n", video)
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Couldn't find video", err)
 		return
@@ -61,20 +66,41 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	videoThumbnails[videoID] = thumbnail{
-		data:      data,
-		mediaType: mediaType,
-	}
-
-	url := fmt.Sprintf("http://localhost:%s/api/thumbnails/%s", cfg.port, videoID)
-	video.ThumbnailURL = &url
-
-	err = cfg.db.UpdateVideo(video)
+	mediaExtension := mediaType[strings.LastIndex(mediaType, "/")+1:]
+	randomBytes := make([]byte, 32)
+	_, err = rand.Read(randomBytes)
 	if err != nil {
-		delete(videoThumbnails, videoID)
-		respondWithError(w, http.StatusInternalServerError, "Couldn't update video", err)
+		respondWithError(w, http.StatusInternalServerError, "Error generating random bytes", err)
+		return
+	}
+	encodedRand := base64.RawURLEncoding.EncodeToString(randomBytes)
+
+	path := filepath.Join(cfg.assetsRoot, fmt.Sprintf("%v.%v", encodedRand, mediaExtension))
+
+	thumbnail, err := os.Create(path)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Error creating file", err)
+		return
+	}
+	defer thumbnail.Close()
+
+	if _, err := io.Copy(thumbnail, file); err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Error writing to file", err)
 		return
 	}
 
+	baseURL := fmt.Sprintf("http://localhost:%v", cfg.port)
+
+	thumbnailURL := fmt.Sprintf("%s/assets/%v.%v", baseURL, encodedRand, mediaExtension)
+
+	video.ThumbnailURL = &thumbnailURL
+
+	err = cfg.db.UpdateVideo(video)
+	fmt.Printf("Update error: %v\n", err)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't update video", err)
+		return
+	}
+	fmt.Printf("Final video state: %+v\n", video)
 	respondWithJSON(w, http.StatusOK, video)
 }

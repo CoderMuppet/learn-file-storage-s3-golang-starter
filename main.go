@@ -1,13 +1,15 @@
 package main
 
 import (
+	"context"
 	"log"
 	"net/http"
 	"os"
 
-	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/database"
-	"github.com/google/uuid"
+	"dotnetdev/internal/database"
 
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
 )
@@ -16,6 +18,7 @@ type apiConfig struct {
 	db               database.Client
 	jwtSecret        string
 	platform         string
+	s3Client         *s3.Client
 	filepathRoot     string
 	assetsRoot       string
 	s3Bucket         string
@@ -23,13 +26,6 @@ type apiConfig struct {
 	s3CfDistribution string
 	port             string
 }
-
-type thumbnail struct {
-	data      []byte
-	mediaType string
-}
-
-var videoThumbnails = map[uuid.UUID]thumbnail{}
 
 func main() {
 	godotenv.Load(".env")
@@ -73,6 +69,9 @@ func main() {
 	if s3Region == "" {
 		log.Fatal("S3_REGION environment variable is not set")
 	}
+	log.Printf("Initializing config - Bucket: %q, Region: %q",
+		os.Getenv("S3_BUCKET"),
+		os.Getenv("S3_REGION"))
 
 	s3CfDistribution := os.Getenv("S3_CF_DISTRO")
 	if s3CfDistribution == "" {
@@ -84,10 +83,19 @@ func main() {
 		log.Fatal("PORT environment variable is not set")
 	}
 
+	awsCfg, err := config.LoadDefaultConfig(context.Background(),
+		config.WithRegion(s3Region))
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	client := s3.NewFromConfig(awsCfg)
+
 	cfg := apiConfig{
 		db:               db,
 		jwtSecret:        jwtSecret,
 		platform:         platform,
+		s3Client:         client,
 		filepathRoot:     filepathRoot,
 		assetsRoot:       assetsRoot,
 		s3Bucket:         s3Bucket,
@@ -106,7 +114,7 @@ func main() {
 	mux.Handle("/app/", appHandler)
 
 	assetsHandler := http.StripPrefix("/assets", http.FileServer(http.Dir(assetsRoot)))
-	mux.Handle("/assets/", cacheMiddleware(assetsHandler))
+	mux.Handle("/assets/", noCacheMiddleware(assetsHandler))
 
 	mux.HandleFunc("POST /api/login", cfg.handlerLogin)
 	mux.HandleFunc("POST /api/refresh", cfg.handlerRefresh)
@@ -119,7 +127,6 @@ func main() {
 	mux.HandleFunc("POST /api/video_upload/{videoID}", cfg.handlerUploadVideo)
 	mux.HandleFunc("GET /api/videos", cfg.handlerVideosRetrieve)
 	mux.HandleFunc("GET /api/videos/{videoID}", cfg.handlerVideoGet)
-	mux.HandleFunc("GET /api/thumbnails/{videoID}", cfg.handlerThumbnailGet)
 	mux.HandleFunc("DELETE /api/videos/{videoID}", cfg.handlerVideoMetaDelete)
 
 	mux.HandleFunc("POST /admin/reset", cfg.handlerReset)
